@@ -18,7 +18,7 @@
 
   <name>Google Groups OAuth Security Realm</name>
   <description>Sign in with Google OAuth; the user's direct Google Group memberships become Jenkins authorities for use with authorization strategies such as Role Strategy.</description>
-  <url>https://github.com/tharuka/jenkins-google-login</url>
+  <url>https://github.com/tlmanz/jenkins-google-login</url>
 
   <licenses>
     <license>
@@ -27,6 +27,20 @@
       <distribution>repo</distribution>
     </license>
   </licenses>
+
+  <developers>
+    <developer>
+      <id>tlmanz</id>
+      <name>Tharuka Mannapperuma</name>
+    </developer>
+  </developers>
+
+  <scm>
+    <connection>scm:git:https://github.com/tlmanz/jenkins-google-login.git</connection>
+    <developerConnection>scm:git:git@github.com:tlmanz/jenkins-google-login.git</developerConnection>
+    <url>https://github.com/tlmanz/jenkins-google-login</url>
+    <tag>${scmTag}</tag>
+  </scm>
 
   <properties>
     <jenkins.baseline>2.479</jenkins.baseline>
@@ -104,6 +118,23 @@
       <scope>test</scope>
     </dependency>
   </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.jenkins-ci.tools</groupId>
+        <artifactId>maven-hpi-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <!-- shown by the plugin manager when index.jelly / update-center data are unavailable -->
+              <Specification-Title>${project.description}</Specification-Title>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
 
   <repositories>
     <repository>

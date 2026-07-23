@@ -38,6 +38,7 @@ import java.util.regex.PatternSyntaxException;
 import jenkins.model.Jenkins;
 import jenkins.security.LastGrantedAuthoritiesProperty;
 import jenkins.security.SecurityListener;
+import jenkins.security.stapler.StaplerDispatchable;
 import org.jenkinsci.Symbol;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.DataBoundSetter;
@@ -202,7 +203,12 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
         };
     }
 
-    /** {@code /securityRealm/whoami} — debug page for silently-filtered group authorities. */
+    /**
+     * {@code /securityRealm/whoami} — debug page for silently-filtered group authorities.
+     * {@link StaplerDispatchable} is required: the return type is a plain object, which
+     * Jenkins' Stapler routing rules would otherwise refuse to dispatch to (HTTP 404).
+     */
+    @StaplerDispatchable
     public WhoAmIAction getWhoami() {
         return new WhoAmIAction();
     }
@@ -343,15 +349,25 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
 
     @NonNull
     private String calculateSafeRedirect(@CheckForNull String from, @CheckForNull String referer) {
-        from = Util.fixEmptyAndTrim(from);
-        if (from != null && Util.isSafeToRedirectTo(from)) {
-            return from;
-        }
         String rootUrl = Jenkins.get().getRootUrl();
-        if (referer != null && rootUrl != null && referer.startsWith(rootUrl)) {
-            return referer;
+        from = Util.fixEmptyAndTrim(from);
+        String target = null;
+        if (from != null && Util.isSafeToRedirectTo(from)) {
+            target = from;
+        } else if (referer != null && rootUrl != null && referer.startsWith(rootUrl)) {
+            target = referer;
         }
-        return rootUrl != null ? rootUrl : "/";
+        // Never bounce back to the login page: after a successful login it would just
+        // show the form again, making the login look like a no-op.
+        if (target == null || isLoginPage(target)) {
+            return rootUrl != null ? rootUrl : "/";
+        }
+        return target;
+    }
+
+    private static boolean isLoginPage(@NonNull String url) {
+        String path = url.split("[?#]", 2)[0];
+        return path.endsWith("/login") || path.endsWith("/loginError");
     }
 
     @NonNull

@@ -65,6 +65,20 @@ public class HybridLoginTest {
     }
 
     @Test
+    public void whoamiIsReachableAnonymouslyAndWhenLoggedIn() throws Exception {
+        JenkinsRule.WebClient anonymous = j.createWebClient();
+        String anonContent = anonymous.goTo("securityRealm/whoami")
+                .getWebResponse().getContentAsString();
+        assertTrue(anonContent.contains("not logged in"));
+
+        JenkinsRule.WebClient wc = j.createWebClient();
+        wc.login("qaautomation", "hunter2");
+        String content = wc.goTo("securityRealm/whoami").getWebResponse().getContentAsString();
+        assertTrue(content.contains("qaautomation"));
+        assertTrue(content.contains("authenticated"));
+    }
+
+    @Test
     public void apiTokenOfLocalUserStillAuthenticates() throws Exception {
         JenkinsRule.WebClient wc = j.createWebClient();
         wc.login("qaautomation", "hunter2");
