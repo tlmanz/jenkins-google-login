@@ -38,22 +38,22 @@ Offboard them           ->  remove them from the group. Done at next login.
 
 ## Features
 
-- 🔐 **Sign in with Google:** OAuth 2.0 code flow with PKCE; ID token fully verified
+- **Sign in with Google:** OAuth 2.0 code flow with PKCE; ID token fully verified
   (signature, issuer, audience, expiry, `email_verified`, hosted-domain claim).
-- 👥 **Google Groups as authorities:** the user's direct group memberships (as
+- **Google Groups as authorities:** the user's direct group memberships (as
   lowercase group emails) become Jenkins authorities, usable in any authorization
   strategy (e.g. [Role Strategy](https://plugins.jenkins.io/role-strategy/)).
-- 🙅 **No admin grant needed:** groups are resolved with the *logged-in user's own*
+- **No admin grant needed:** groups are resolved with the *logged-in user's own*
   OAuth token via the Cloud Identity API. No service account, no domain-wide
   delegation, no Workspace super-admin involvement.
-- 🧯 **Break-glass password login:** the standard username/password form keeps working
+- **Break-glass password login:** the standard username/password form keeps working
   for users created under the previous local-database realm, so a Google outage or
   misconfiguration never locks you out.
-- 🤖 **API tokens unaffected:** existing automation users keep authenticating with
+- **API tokens unaffected:** existing automation users keep authenticating with
   their Jenkins API tokens.
-- 📜 **Configuration as Code:** first-class [JCasC](https://plugins.jenkins.io/configuration-as-code/)
+- **Configuration as Code:** first-class [JCasC](https://plugins.jenkins.io/configuration-as-code/)
   support, including env-var interpolation for every field.
-- 🔎 **`/securityRealm/whoami`:** a self-service debug page showing exactly which
+- **`/securityRealm/whoami`:** a self-service debug page showing exactly which
   authorities were resolved at login.
 
 ## How it works
@@ -236,11 +236,11 @@ That's it. Membership changes in Google Groups apply at each user's next login.
 
 | Field | Required | Default | Description |
 |---|---|---|---|
-| `clientId` | ✅ | *(none)* | OAuth client ID from Step 1 |
-| `clientSecret` | ✅ | *(none)* | OAuth client secret (stored encrypted as `hudson.util.Secret`) |
-| `hostedDomain` | ✅ | *(none)* | Workspace domain, e.g. `your-domain.com`. Logins are **rejected** unless the verified ID token's `hd` claim equals this (defense in depth on top of the Internal consent screen) |
-| `groupIncludePattern` | ❌ | *(all groups)* | Java regex; only matching group emails become authorities. Keeps authority lists small, e.g. `^jenkins-.*@your-domain\.com$` |
-| `onGroupLookupFailure` | ❌ | `DEGRADE` | What to do when the group lookup fails at login: `DEGRADE` = log in with only the `authenticated` authority and log a loud WARNING; `FAIL` = refuse the login. Failures are never cached as "no groups" |
+| `clientId` | Yes | *(none)* | OAuth client ID from Step 1 |
+| `clientSecret` | Yes | *(none)* | OAuth client secret (stored encrypted as `hudson.util.Secret`) |
+| `hostedDomain` | Yes | *(none)* | Workspace domain, e.g. `your-domain.com`. Logins are **rejected** unless the verified ID token's `hd` claim equals this (defense in depth on top of the Internal consent screen) |
+| `groupIncludePattern` | No | *(all groups)* | Java regex; only matching group emails become authorities. Keeps authority lists small, e.g. `^jenkins-.*@your-domain\.com$` |
+| `onGroupLookupFailure` | No | `DEGRADE` | What to do when the group lookup fails at login: `DEGRADE` = log in with only the `authenticated` authority and log a loud WARNING; `FAIL` = refuse the login. Failures are never cached as "no groups" |
 
 Behavior notes:
 
