@@ -1,0 +1,8 @@
+jenkins:
+  securityRealm:
+    googleGroupsOAuth:
+      clientId: "test-client-id.apps.googleusercontent.com"
+      clientSecret: "s3cret-value"
+      hostedDomain: "example.com"
+      groupIncludePattern: "^jenkins-.*@example\\.com$"
+      onGroupLookupFailure: "FAIL"

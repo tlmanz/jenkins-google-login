@@ -1,0 +1,12 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core">
+  <j:if test="${it.enabled}">
+    <j:set var="fromSafe" value="${empty(from) ? '' : h.urlEncode(from)}"/>
+    <div style="margin-top: 1rem;">
+      <a class="jenkins-button" style="width: 100%; justify-content: center;"
+         href="${rootURL}/securityRealm/commenceLogin?from=${fromSafe}">
+        ${%Sign in with Google}
+      </a>
+    </div>
+  </j:if>
+</j:jelly>

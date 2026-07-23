@@ -1,0 +1,488 @@
+package io.jenkins.plugins.googlegroupsoauth;
+
+import com.google.api.client.googleapis.auth.oauth2.GoogleIdToken;
+import com.google.api.client.googleapis.auth.oauth2.GoogleTokenResponse;
+import com.google.api.client.http.HttpTransport;
+import com.google.api.client.http.javanet.NetHttpTransport;
+import edu.umd.cs.findbugs.annotations.CheckForNull;
+import edu.umd.cs.findbugs.annotations.NonNull;
+import hudson.Extension;
+import hudson.Util;
+import hudson.model.Descriptor;
+import hudson.model.User;
+import hudson.security.AbstractPasswordBasedSecurityRealm;
+import hudson.security.GroupDetails;
+import hudson.security.HudsonPrivateSecurityRealm;
+import hudson.security.SecurityRealm;
+import hudson.util.FormValidation;
+import hudson.util.ListBoxModel;
+import hudson.util.Secret;
+import jakarta.servlet.http.HttpSession;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.LongSupplier;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
+import jenkins.model.Jenkins;
+import jenkins.security.LastGrantedAuthoritiesProperty;
+import jenkins.security.SecurityListener;
+import org.jenkinsci.Symbol;
+import org.kohsuke.stapler.DataBoundConstructor;
+import org.kohsuke.stapler.DataBoundSetter;
+import org.kohsuke.stapler.Header;
+import org.kohsuke.stapler.HttpResponse;
+import org.kohsuke.stapler.HttpResponses;
+import org.kohsuke.stapler.QueryParameter;
+import org.kohsuke.stapler.StaplerRequest2;
+import org.kohsuke.stapler.interceptor.RequirePOST;
+import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+
+/**
+ * Hybrid security realm: sign in with Google OAuth (with the user's direct Google Group
+ * memberships — group emails — as Jenkins authorities) <b>or</b> with a local username and
+ * password. Group resolution uses the logged-in user's own OAuth token against the Cloud
+ * Identity API — no service account or Workspace admin grant needed.
+ *
+ * <p>The standard Jenkins login page is kept: its username/password form is checked against
+ * the {@link HudsonPrivateSecurityRealm.Details} property stored on existing local user
+ * records (created under the local-database realm), which is the break-glass path if Google
+ * OAuth is down or misconfigured. {@link GoogleFederatedLoginService} adds the
+ * "Sign in with Google" button underneath that form.
+ *
+ * <p>Google user id = full email (lowercase). Authorities are re-resolved at each Google
+ * login and live for the session; API-token requests and password logins get the authorities
+ * recorded at the user's last Google login via {@link LastGrantedAuthoritiesProperty}.
+ * Pre-existing local users' API tokens keep working because token authentication checks
+ * stored user records independent of this realm.
+ */
+public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityRealm {
+
+    private static final Logger LOGGER = Logger.getLogger(GoogleGroupsSecurityRealm.class.getName());
+
+    private static final String SESSION_STATE = GoogleGroupsSecurityRealm.class.getName() + ".state";
+    private static final String SESSION_PKCE_VERIFIER = GoogleGroupsSecurityRealm.class.getName() + ".pkceVerifier";
+    private static final String SESSION_FROM = GoogleGroupsSecurityRealm.class.getName() + ".from";
+
+    /** Well-formed group email; {@link #loadGroupByGroupname2} accepts these without a directory call. */
+    private static final Pattern GROUP_EMAIL = Pattern.compile("^[a-zA-Z0-9._%+'-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+
+    /** Absorbs login storms/retries; short enough that membership changes still apply promptly. */
+    private static final long GROUP_CACHE_TTL_MILLIS = 60_000;
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    private final String clientId;
+    private final Secret clientSecret;
+    private final String hostedDomain;
+    @CheckForNull
+    private String groupIncludePattern;
+    @NonNull
+    private GroupLookupFailurePolicy onGroupLookupFailure = GroupLookupFailurePolicy.DEGRADE;
+
+    private transient volatile GroupResolver groupResolver;
+    private transient volatile Map<String, CachedGroups> groupCache;
+    private transient LongSupplier clock = System::currentTimeMillis;
+
+    @DataBoundConstructor
+    public GoogleGroupsSecurityRealm(String clientId, Secret clientSecret, String hostedDomain) {
+        this.clientId = Util.fixEmptyAndTrim(clientId);
+        this.clientSecret = clientSecret;
+        this.hostedDomain = Util.fixEmptyAndTrim(hostedDomain);
+    }
+
+    public String getClientId() {
+        return clientId;
+    }
+
+    public Secret getClientSecret() {
+        return clientSecret;
+    }
+
+    public String getHostedDomain() {
+        return hostedDomain;
+    }
+
+    @CheckForNull
+    public String getGroupIncludePattern() {
+        return groupIncludePattern;
+    }
+
+    @DataBoundSetter
+    public void setGroupIncludePattern(@CheckForNull String groupIncludePattern) {
+        this.groupIncludePattern = Util.fixEmptyAndTrim(groupIncludePattern);
+    }
+
+    @NonNull
+    public GroupLookupFailurePolicy getOnGroupLookupFailure() {
+        return onGroupLookupFailure;
+    }
+
+    @DataBoundSetter
+    public void setOnGroupLookupFailure(@NonNull GroupLookupFailurePolicy onGroupLookupFailure) {
+        this.onGroupLookupFailure = onGroupLookupFailure;
+    }
+
+    @Override
+    public boolean allowsSignup() {
+        return false;
+    }
+
+    /**
+     * Break-glass password login on the standard Jenkins login form: checks the candidate
+     * password against the {@link HudsonPrivateSecurityRealm.Details} property stored on the
+     * user record (present on users created under the local-database realm). Users without a
+     * stored password — i.e. everyone who only ever logged in via Google — cannot log in by
+     * password at all.
+     */
+    @Override
+    protected UserDetails authenticate2(String username, String password) throws AuthenticationException {
+        User user = User.getById(username, false);
+        HudsonPrivateSecurityRealm.Details details =
+                user != null ? user.getProperty(HudsonPrivateSecurityRealm.Details.class) : null;
+        if (details == null || !details.isPasswordCorrect(password)) {
+            throw new BadCredentialsException("Invalid username or password");
+        }
+        LOGGER.info(() -> "Local password login: " + username);
+        return loadUserByUsername2(username);
+    }
+
+    /**
+     * Returns the user if a Jenkins user record exists — this keeps API-token users resolvable
+     * and lets authorization strategies validate names. Authorities come from the last
+     * interactive login ({@link LastGrantedAuthoritiesProperty}), so API-token requests carry
+     * the user's group authorities too.
+     */
+    @Override
+    public UserDetails loadUserByUsername2(String username) throws UsernameNotFoundException {
+        User user = User.getById(username, false);
+        if (user == null) {
+            throw new UsernameNotFoundException("No Jenkins user record for: " + username);
+        }
+        LastGrantedAuthoritiesProperty property = user.getProperty(LastGrantedAuthoritiesProperty.class);
+        List<GrantedAuthority> authorities = property != null
+                ? new ArrayList<>(property.getAuthorities2())
+                : List.of(AUTHENTICATED_AUTHORITY2);
+        return new org.springframework.security.core.userdetails.User(username, "", authorities);
+    }
+
+    /**
+     * Accepts any well-formed group email. We cannot enumerate or validate groups server-side
+     * in user-token mode, so this never makes a directory call.
+     */
+    @Override
+    public GroupDetails loadGroupByGroupname2(String groupname, boolean fetchMembers) throws UsernameNotFoundException {
+        if (groupname == null || !GROUP_EMAIL.matcher(groupname).matches()) {
+            throw new UsernameNotFoundException("Not a well-formed group email: " + groupname);
+        }
+        String normalized = groupname.toLowerCase(Locale.ROOT);
+        return new GroupDetails() {
+            @Override
+            public String getName() {
+                return normalized;
+            }
+        };
+    }
+
+    /** {@code /securityRealm/whoami} — debug page for silently-filtered group authorities. */
+    public WhoAmIAction getWhoami() {
+        return new WhoAmIAction();
+    }
+
+    // ---------------------------------------------------------------- login flow
+
+    public HttpResponse doCommenceLogin(
+            StaplerRequest2 request, @QueryParameter String from, @Header("Referer") String referer)
+            throws IOException {
+        String redirectOnFinish = calculateSafeRedirect(from, referer);
+        String state = randomUrlSafeToken();
+        String pkceVerifier = randomUrlSafeToken();
+        HttpSession session = request.getSession(true);
+        session.setAttribute(SESSION_STATE, state);
+        session.setAttribute(SESSION_PKCE_VERIFIER, pkceVerifier);
+        session.setAttribute(SESSION_FROM, redirectOnFinish);
+        String url = createOAuthService().buildAuthorizationUrl(buildRedirectUri(), state, s256Challenge(pkceVerifier));
+        return HttpResponses.redirectTo(url);
+    }
+
+    public HttpResponse doFinishLogin(
+            StaplerRequest2 request,
+            @QueryParameter String code,
+            @QueryParameter String state,
+            @QueryParameter String error)
+            throws IOException {
+        HttpSession session = request.getSession(false);
+        String expectedState = session != null ? (String) session.getAttribute(SESSION_STATE) : null;
+        String pkceVerifier = session != null ? (String) session.getAttribute(SESSION_PKCE_VERIFIER) : null;
+        String from = session != null ? (String) session.getAttribute(SESSION_FROM) : null;
+
+        if (error != null) {
+            LOGGER.warning(() -> "Google login refused by authorization server: " + error);
+            return HttpResponses.errorWithoutStack(401, "Google login failed: " + error);
+        }
+        if (code == null || state == null || expectedState == null || pkceVerifier == null
+                || !MessageDigest.isEqual(
+                        expectedState.getBytes(StandardCharsets.UTF_8), state.getBytes(StandardCharsets.UTF_8))) {
+            return HttpResponses.errorWithoutStack(401,
+                    "State did not match or login session expired. Please try logging in again.");
+        }
+
+        GoogleTokenResponse tokenResponse;
+        GoogleIdToken.Payload payload;
+        try {
+            GoogleOAuthService oauth = createOAuthService();
+            tokenResponse = oauth.exchangeCode(code, buildRedirectUri(), pkceVerifier);
+            payload = oauth.verifyAndGetPayload(tokenResponse);
+        } catch (IOException | GeneralSecurityException e) {
+            LOGGER.log(Level.WARNING, "Google login failed during token exchange/validation", e);
+            return HttpResponses.errorWithoutStack(401, "Google login failed: " + e.getMessage());
+        }
+
+        GoogleUserInfo userInfo = new GoogleUserInfo(payload);
+        String userId = userInfo.getEmail();
+
+        List<GrantedAuthority> authorities;
+        try {
+            authorities = authoritiesForLogin(userId, tokenResponse.getAccessToken());
+        } catch (IOException e) {
+            LOGGER.log(Level.SEVERE, "Refusing login for " + userId
+                    + " because group lookup failed and onGroupLookupFailure=FAIL", e);
+            return HttpResponses.errorWithoutStack(401,
+                    "Login refused: Google Groups could not be resolved. Contact an administrator.");
+        }
+
+        // Session fixation protection: discard the pre-login session.
+        if (session != null) {
+            session.invalidate();
+        }
+        request.getSession(true);
+
+        UsernamePasswordAuthenticationToken token = new UsernamePasswordAuthenticationToken(userId, "", authorities);
+        SecurityContextHolder.getContext().setAuthentication(token);
+
+        User user = User.getById(userId, true);
+        userInfo.updateProfile(user);
+
+        SecurityListener.fireAuthenticated2(
+                new org.springframework.security.core.userdetails.User(userId, "", authorities));
+        SecurityListener.fireLoggedIn(userId);
+
+        // The operational answer to Google's silent group filtering: always log what resolved.
+        List<String> authorityNames = authorities.stream().map(GrantedAuthority::getAuthority).toList();
+        LOGGER.info(() -> "Google login: " + userId + " authorities=" + authorityNames);
+
+        return HttpResponses.redirectTo(from != null ? from : Jenkins.get().getRootUrl());
+    }
+
+    /**
+     * Resolves group authorities, applying {@link #getOnGroupLookupFailure()}: on lookup
+     * failure either degrade to {@code authenticated} only (with a loud WARNING) or rethrow
+     * so the login is refused. Failures are never cached.
+     */
+    @NonNull
+    List<GrantedAuthority> authoritiesForLogin(@NonNull String email, @NonNull String accessToken) throws IOException {
+        List<GrantedAuthority> authorities = new ArrayList<>();
+        authorities.add(AUTHENTICATED_AUTHORITY2);
+        try {
+            for (String group : resolveGroupsCached(email, accessToken)) {
+                authorities.add(new SimpleGrantedAuthority(group));
+            }
+        } catch (IOException | RuntimeException e) {
+            if (onGroupLookupFailure == GroupLookupFailurePolicy.FAIL) {
+                throw e instanceof IOException ioe ? ioe : new IOException("Group lookup failed for " + email, e);
+            }
+            LOGGER.log(Level.WARNING, "Group lookup failed for " + email
+                    + "; logging in with 'authenticated' only (onGroupLookupFailure=DEGRADE). "
+                    + "Group-based permissions will be missing until the next successful login.", e);
+        }
+        return authorities;
+    }
+
+    @NonNull
+    private List<String> resolveGroupsCached(@NonNull String email, @NonNull String accessToken) throws IOException {
+        Map<String, CachedGroups> cache = groupCache();
+        long now = clock().getAsLong();
+        CachedGroups cached = cache.get(email);
+        if (cached != null && now - cached.timestamp() < GROUP_CACHE_TTL_MILLIS) {
+            return cached.groups();
+        }
+        List<String> groups = groupResolver().resolveGroups(email, accessToken);
+        cache.put(email, new CachedGroups(now, List.copyOf(groups)));
+        return groups;
+    }
+
+    // ---------------------------------------------------------------- helpers
+
+    @NonNull
+    String buildRedirectUri() {
+        String rootUrl = Jenkins.get().getRootUrl();
+        if (rootUrl == null) {
+            throw new IllegalStateException(
+                    "Jenkins root URL is not configured; it is required to build the OAuth redirect URI");
+        }
+        return rootUrl + "securityRealm/finishLogin";
+    }
+
+    @NonNull
+    private String calculateSafeRedirect(@CheckForNull String from, @CheckForNull String referer) {
+        from = Util.fixEmptyAndTrim(from);
+        if (from != null && Util.isSafeToRedirectTo(from)) {
+            return from;
+        }
+        String rootUrl = Jenkins.get().getRootUrl();
+        if (referer != null && rootUrl != null && referer.startsWith(rootUrl)) {
+            return referer;
+        }
+        return rootUrl != null ? rootUrl : "/";
+    }
+
+    @NonNull
+    GoogleOAuthService createOAuthService() {
+        return new GoogleOAuthService(clientId, clientSecret, hostedDomain, createTransport());
+    }
+
+    @NonNull
+    HttpTransport createTransport() {
+        return new NetHttpTransport();
+    }
+
+    @NonNull
+    private GroupResolver groupResolver() {
+        GroupResolver resolver = groupResolver;
+        if (resolver == null) {
+            Pattern pattern = groupIncludePattern != null ? Pattern.compile(groupIncludePattern) : null;
+            resolver = new CloudIdentityDirectGroupResolver(createTransport(), pattern);
+            groupResolver = resolver;
+        }
+        return resolver;
+    }
+
+    /** Test hook: inject a stub resolver. */
+    void setGroupResolver(@CheckForNull GroupResolver groupResolver) {
+        this.groupResolver = groupResolver;
+    }
+
+    @NonNull
+    private Map<String, CachedGroups> groupCache() {
+        Map<String, CachedGroups> cache = groupCache;
+        if (cache == null) {
+            synchronized (this) {
+                cache = groupCache;
+                if (cache == null) {
+                    cache = new ConcurrentHashMap<>();
+                    groupCache = cache;
+                }
+            }
+        }
+        return cache;
+    }
+
+    @NonNull
+    private LongSupplier clock() {
+        LongSupplier c = clock;
+        if (c == null) {
+            c = System::currentTimeMillis;
+            clock = c;
+        }
+        return c;
+    }
+
+    /** Test hook: control time for cache-expiry tests. */
+    void setClock(@NonNull LongSupplier clock) {
+        this.clock = clock;
+    }
+
+    @NonNull
+    private static String randomUrlSafeToken() {
+        byte[] bytes = new byte[32];
+        RANDOM.nextBytes(bytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+
+    @NonNull
+    static String s256Challenge(@NonNull String verifier) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return Base64.getUrlEncoder().withoutPadding()
+                    .encodeToString(digest.digest(verifier.getBytes(StandardCharsets.US_ASCII)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+    }
+
+    private record CachedGroups(long timestamp, @NonNull List<String> groups) {}
+
+    @Extension
+    @Symbol("googleGroupsOAuth")
+    public static class DescriptorImpl extends Descriptor<SecurityRealm> {
+
+        @NonNull
+        @Override
+        public String getDisplayName() {
+            return Messages.GoogleGroupsSecurityRealm_DisplayName();
+        }
+
+        @RequirePOST
+        public FormValidation doCheckClientId(@QueryParameter String value) {
+            Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+            if (Util.fixEmptyAndTrim(value) == null) {
+                return FormValidation.error(Messages.GoogleGroupsSecurityRealm_ClientIdRequired());
+            }
+            return FormValidation.ok();
+        }
+
+        @RequirePOST
+        public FormValidation doCheckHostedDomain(@QueryParameter String value) {
+            Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+            String domain = Util.fixEmptyAndTrim(value);
+            if (domain == null) {
+                return FormValidation.error(Messages.GoogleGroupsSecurityRealm_HostedDomainRequired());
+            }
+            if (domain.contains("@") || domain.contains("/") || !domain.contains(".")) {
+                return FormValidation.error(Messages.GoogleGroupsSecurityRealm_HostedDomainInvalid());
+            }
+            return FormValidation.ok();
+        }
+
+        @RequirePOST
+        public FormValidation doCheckGroupIncludePattern(@QueryParameter String value) {
+            Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+            String pattern = Util.fixEmptyAndTrim(value);
+            if (pattern == null) {
+                return FormValidation.ok(Messages.GoogleGroupsSecurityRealm_GroupIncludePatternEmpty());
+            }
+            try {
+                Pattern.compile(pattern);
+                return FormValidation.ok();
+            } catch (PatternSyntaxException e) {
+                return FormValidation.error(e, Messages.GoogleGroupsSecurityRealm_GroupIncludePatternInvalid());
+            }
+        }
+
+        public ListBoxModel doFillOnGroupLookupFailureItems() {
+            ListBoxModel model = new ListBoxModel();
+            for (GroupLookupFailurePolicy policy : GroupLookupFailurePolicy.values()) {
+                model.add(policy.name());
+            }
+            return model;
+        }
+    }
+}

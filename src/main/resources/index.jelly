@@ -1,0 +1,9 @@
+<?jelly escape-by-default='true'?>
+<div>
+  Security realm that signs users in with Google OAuth and turns their direct Google Group
+  memberships into Jenkins authorities, so authorization strategies such as Role Strategy can
+  bind roles to Google Group emails instead of local users. Group resolution uses the
+  logged-in user's own OAuth token via the Cloud Identity API; no service account or
+  Workspace admin grant is required. Note: only direct (non-nested) group memberships
+  resolve.
+</div>

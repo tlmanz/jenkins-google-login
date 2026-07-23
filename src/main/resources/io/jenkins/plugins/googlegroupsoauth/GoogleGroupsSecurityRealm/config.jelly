@@ -1,0 +1,21 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:f="/lib/form">
+  <f:entry title="${%Client ID}" field="clientId">
+    <f:textbox/>
+  </f:entry>
+  <f:entry title="${%Client secret}" field="clientSecret">
+    <f:password/>
+  </f:entry>
+  <f:entry title="${%Hosted domain}" field="hostedDomain"
+           description="Required. Logins are rejected unless the Google ID token hd claim equals this domain, e.g. example.com">
+    <f:textbox/>
+  </f:entry>
+  <f:entry title="${%Group include pattern}" field="groupIncludePattern"
+           description="Optional regular expression; only matching group emails become authorities. Empty = include all groups.">
+    <f:textbox/>
+  </f:entry>
+  <f:entry title="${%On group lookup failure}" field="onGroupLookupFailure"
+           description="DEGRADE: log in with only the authenticated authority and log a warning. FAIL: refuse the login.">
+    <f:select/>
+  </f:entry>
+</j:jelly>
