@@ -9,9 +9,15 @@ import static org.mockito.Mockito.when;
 
 import com.google.api.client.googleapis.auth.oauth2.GoogleIdToken;
 import com.google.api.client.googleapis.auth.oauth2.GoogleIdTokenVerifier;
+import com.google.api.client.googleapis.auth.oauth2.GoogleTokenResponse;
+import com.google.api.client.json.Json;
+import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.client.json.webtoken.JsonWebSignature;
 import com.google.api.client.testing.http.MockHttpTransport;
+import com.google.api.client.testing.http.MockLowLevelHttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.util.Base64;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -114,6 +120,54 @@ public class GoogleOAuthServiceTest {
         assertTrue(url.contains("hd=example.com"));
         assertTrue(url.contains("cloud-identity.groups.readonly"));
         assertTrue(url.contains("openid"));
+    }
+
+    @Test
+    public void productionConstructorBuildsWorkingService() {
+        GoogleOAuthService svc = new GoogleOAuthService(CLIENT_ID, null, DOMAIN, new MockHttpTransport());
+        assertTrue(svc.buildAuthorizationUrl("https://cb.example.com/finish", "s", "c")
+                .contains("client_id=" + CLIENT_ID));
+    }
+
+    @Test
+    public void exchangeCodeSendsCodeVerifierAndParsesTokens() throws Exception {
+        MockLowLevelHttpResponse response = new MockLowLevelHttpResponse()
+                .setContentType(Json.MEDIA_TYPE)
+                .setContent("{\"access_token\":\"the-access-token\",\"token_type\":\"Bearer\",\"expires_in\":3600}");
+        MockHttpTransport transport = new MockHttpTransport.Builder()
+                .setLowLevelHttpResponse(response)
+                .build();
+        GoogleOAuthService svc = new GoogleOAuthService(CLIENT_ID, null, DOMAIN, transport, verifier);
+
+        GoogleTokenResponse tokens = svc.exchangeCode("the-code", "https://cb.example.com/finish", "the-verifier");
+
+        assertEquals("the-access-token", tokens.getAccessToken());
+        String body = transport.getLowLevelHttpRequest().getContentAsString();
+        assertTrue(body.contains("code=the-code"));
+        assertTrue(body.contains("code_verifier=the-verifier"));
+        assertTrue(body.contains("grant_type=authorization_code"));
+    }
+
+    @Test
+    public void idTokenIsParsedOutOfTokenResponse() throws Exception {
+        when(verifier.verify(any(GoogleIdToken.class))).thenReturn(true);
+        GoogleTokenResponse tokenResponse = new GoogleTokenResponse();
+        tokenResponse.setIdToken(serializeUnsigned(validPayload()));
+        assertEquals("Alice@Example.com", service.verifyAndGetPayload(tokenResponse).getEmail());
+    }
+
+    @Test
+    public void tokenResponseWithoutIdTokenIsRejected() {
+        GoogleTokenResponse tokenResponse = new GoogleTokenResponse();
+        assertThrows(GeneralSecurityException.class, () -> service.verifyAndGetPayload(tokenResponse));
+    }
+
+    /** JWS-serializes a payload with a dummy signature; the (mocked) verifier never checks it. */
+    private static String serializeUnsigned(GoogleIdToken.Payload payload) throws Exception {
+        Base64.Encoder b64 = Base64.getUrlEncoder().withoutPadding();
+        return b64.encodeToString("{\"alg\":\"RS256\"}".getBytes(StandardCharsets.UTF_8))
+                + "." + b64.encodeToString(GsonFactory.getDefaultInstance().toByteArray(payload))
+                + "." + b64.encodeToString("sig".getBytes(StandardCharsets.UTF_8));
     }
 
     @Test

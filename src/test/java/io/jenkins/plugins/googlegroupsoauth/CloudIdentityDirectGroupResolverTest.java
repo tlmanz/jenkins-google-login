@@ -117,6 +117,39 @@ public class CloudIdentityDirectGroupResolverTest {
     }
 
     @Test
+    public void paginationStopsAtCapInsteadOfLoopingForever() throws Exception {
+        // Every page advertises another one: the resolver must stop at its cap. A fresh
+        // response is built per request because mock response streams are single-use.
+        List<String> urls = new ArrayList<>();
+        MockHttpTransport transport = new MockHttpTransport() {
+            @Override
+            public LowLevelHttpRequest buildRequest(String method, String url) {
+                urls.add(url);
+                return new MockLowLevelHttpRequest(url) {
+                    @Override
+                    public LowLevelHttpResponse execute() {
+                        return jsonResponse("{\"memberships\":[{\"groupKey\":{\"id\":\"g@example.com\"}}],"
+                                + "\"nextPageToken\":\"again\"}");
+                    }
+                };
+            }
+        };
+        CloudIdentityDirectGroupResolver resolver = new CloudIdentityDirectGroupResolver(transport, null);
+        assertEquals(List.of("g@example.com"), resolver.resolveGroups(EMAIL, TOKEN));
+        assertEquals(50, urls.size());
+    }
+
+    @Test
+    public void malformedMembershipEntriesAreSkippedAndEmptyPageTokenEndsPaging() throws Exception {
+        SequencedTransport transport = new SequencedTransport(jsonResponse(
+                "{\"memberships\":[42,{\"other\":1},{\"groupKey\":{}},{\"groupKey\":{\"id\":\"ok@example.com\"}}],"
+                        + "\"nextPageToken\":\"\"}"));
+        CloudIdentityDirectGroupResolver resolver = new CloudIdentityDirectGroupResolver(transport, null);
+        assertEquals(List.of("ok@example.com"), resolver.resolveGroups(EMAIL, TOKEN));
+        assertEquals(1, transport.urls.size());
+    }
+
+    @Test
     public void emailWithQuoteIsRejectedWithoutAnyRequest() {
         SequencedTransport transport = new SequencedTransport(jsonResponse("{}"));
         CloudIdentityDirectGroupResolver resolver = new CloudIdentityDirectGroupResolver(transport, null);

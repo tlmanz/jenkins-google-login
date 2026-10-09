@@ -45,6 +45,8 @@
   <properties>
     <jenkins.baseline>2.479</jenkins.baseline>
     <jenkins.version>${jenkins.baseline}.3</jenkins.version>
+    <hpi.bundledArtifacts>commons-codec,error_prone_annotations,google-api-client,google-http-client,google-http-client-gson,google-oauth-client,grpc-api,grpc-context,opencensus-api,opencensus-contrib-http-util</hpi.bundledArtifacts>
+    <hpi.strictBundledArtifacts>true</hpi.strictBundledArtifacts>
   </properties>
 
   <dependencyManagement>
@@ -99,6 +101,39 @@
           <groupId>com.google.guava</groupId>
           <artifactId>failureaccess</artifactId>
         </exclusion>
+        <!-- unused here: only the code-flow/ID-token classes and NetHttpTransport+gson are
+             used, so the Apache HTTP transport stack, the auth-library used by the generated
+             service clients, and annotation-only jars need not be bundled into the .hpi.
+             commons-codec stays: google-http-client's Base64 (ID-token parsing) delegates to
+             it; opencensus/grpc stay: referenced unconditionally by google-http-client. -->
+        <exclusion>
+          <groupId>com.google.auth</groupId>
+          <artifactId>google-auth-library-credentials</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.google.auth</groupId>
+          <artifactId>google-auth-library-oauth2-http</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.google.http-client</groupId>
+          <artifactId>google-http-client-apache-v2</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.httpcomponents</groupId>
+          <artifactId>httpclient</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.httpcomponents</groupId>
+          <artifactId>httpcore</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.google.j2objc</groupId>
+          <artifactId>j2objc-annotations</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.google.auto.value</groupId>
+          <artifactId>auto-value-annotations</artifactId>
+        </exclusion>
       </exclusions>
     </dependency>
 
@@ -135,6 +170,44 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!-- Merges with the parent POM's enable-jacoco profile (prepare-agent + report),
+         adding a coverage floor enforced by `mvn -Penable-jacoco verify` (used in CI). -->
+    <profile>
+      <id>enable-jacoco</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.jacoco</groupId>
+            <artifactId>jacoco-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>coverage-check</id>
+                <goals>
+                  <goal>check</goal>
+                </goals>
+                <configuration>
+                  <rules>
+                    <rule>
+                      <element>BUNDLE</element>
+                      <limits>
+                        <limit>
+                          <counter>LINE</counter>
+                          <value>COVEREDRATIO</value>
+                          <minimum>0.90</minimum>
+                        </limit>
+                      </limits>
+                    </rule>
+                  </rules>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 
   <repositories>
     <repository>

@@ -89,6 +89,9 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
     /** Absorbs login storms/retries; short enough that membership changes still apply promptly. */
     private static final long GROUP_CACHE_TTL_MILLIS = 60_000;
 
+    /** Expired entries are purged once this many distinct users are cached, bounding memory. */
+    private static final int GROUP_CACHE_MAX_SIZE = 1000;
+
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final String clientId;
@@ -160,6 +163,7 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
         HudsonPrivateSecurityRealm.Details details =
                 user != null ? user.getProperty(HudsonPrivateSecurityRealm.Details.class) : null;
         if (details == null || !details.isPasswordCorrect(password)) {
+            LOGGER.warning(() -> "Failed local password login attempt for: " + username);
             throw new BadCredentialsException("Invalid username or password");
         }
         LOGGER.info(() -> "Local password login: " + username);
@@ -239,6 +243,14 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
         String expectedState = session != null ? (String) session.getAttribute(SESSION_STATE) : null;
         String pkceVerifier = session != null ? (String) session.getAttribute(SESSION_PKCE_VERIFIER) : null;
         String from = session != null ? (String) session.getAttribute(SESSION_FROM) : null;
+
+        // The state and PKCE verifier are single-use: a failed callback must restart at
+        // commenceLogin instead of retrying with the same state.
+        if (session != null) {
+            session.removeAttribute(SESSION_STATE);
+            session.removeAttribute(SESSION_PKCE_VERIFIER);
+            session.removeAttribute(SESSION_FROM);
+        }
 
         if (error != null) {
             LOGGER.warning(() -> "Google login refused by authorization server: " + error);
@@ -331,8 +343,16 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
             return cached.groups();
         }
         List<String> groups = groupResolver().resolveGroups(email, accessToken);
+        if (cache.size() >= GROUP_CACHE_MAX_SIZE) {
+            cache.values().removeIf(entry -> now - entry.timestamp() >= GROUP_CACHE_TTL_MILLIS);
+        }
         cache.put(email, new CachedGroups(now, List.copyOf(groups)));
         return groups;
+    }
+
+    /** Test hook: number of cached group entries. */
+    int cachedGroupCount() {
+        return groupCache().size();
     }
 
     // ---------------------------------------------------------------- helpers

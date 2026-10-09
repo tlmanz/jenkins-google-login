@@ -15,8 +15,8 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: maven
-      - name: Build and test
-        run: ./mvnw -B -ntp verify
+      - name: Build and test (with coverage gate)
+        run: ./mvnw -B -ntp -Penable-jacoco verify
       - name: Archive plugin
         uses: actions/upload-artifact@v4
         with:
