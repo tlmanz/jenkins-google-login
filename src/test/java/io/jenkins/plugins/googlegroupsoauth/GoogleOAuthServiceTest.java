@@ -43,6 +43,7 @@ public class GoogleOAuthServiceTest {
 
     private static GoogleIdToken.Payload validPayload() {
         GoogleIdToken.Payload payload = new GoogleIdToken.Payload();
+        payload.setSubject("1234567890");
         payload.setEmail("Alice@Example.com");
         payload.setEmailVerified(true);
         payload.setHostedDomain("example.com");
@@ -104,6 +105,16 @@ public class GoogleOAuthServiceTest {
         when(verifier.verify(any(GoogleIdToken.class))).thenReturn(true);
         GoogleIdToken.Payload payload = validPayload();
         payload.setEmail(null);
+        assertThrows(GeneralSecurityException.class, () -> service.verifyAndGetPayload(idToken(payload)));
+    }
+
+    @Test
+    public void missingSubjectIsRejected() throws Exception {
+        when(verifier.verify(any(GoogleIdToken.class))).thenReturn(true);
+        GoogleIdToken.Payload payload = validPayload();
+        payload.setSubject(null);
+        assertThrows(GeneralSecurityException.class, () -> service.verifyAndGetPayload(idToken(payload)));
+        payload.setSubject("");
         assertThrows(GeneralSecurityException.class, () -> service.verifyAndGetPayload(idToken(payload)));
     }
 

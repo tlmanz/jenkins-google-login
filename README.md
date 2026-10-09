@@ -11,7 +11,8 @@ Jenkins users. A local **username/password fallback** is kept as a break-glass p
 
 ```
 Onboard a QA engineer   ->  add them to jenkins-qa@your-domain.com. Done.
-Offboard them           ->  remove them from the group. Done at next login.
+Offboard them           ->  remove them from the group. Applies at their next login;
+                            their API tokens lose it within groupAuthorityMaxAgeDays.
 ```
 
 ---
@@ -51,6 +52,11 @@ Offboard them           ->  remove them from the group. Done at next login.
   misconfiguration never locks you out.
 - **API tokens unaffected:** existing automation users keep authenticating with
   their Jenkins API tokens.
+- **Offboarding-safe API tokens:** group permissions used by API tokens expire a
+  configurable number of days after the user's last Google login (default 7).
+- **Account binding:** each Jenkins user is bound to the Google account (`sub`) that
+  first signed in with that email, so a reassigned email address cannot take over the
+  previous owner's API tokens, credentials or permissions.
 - **Configuration as Code:** first-class [JCasC](https://plugins.jenkins.io/configuration-as-code/)
   support, including env-var interpolation for every field.
 - **`/securityRealm/whoami`:** a self-service debug page showing exactly which
@@ -83,10 +89,13 @@ sequenceDiagram
     Note over U,J: Role Strategy matches "group:" entries<br/>against the resolved authorities
 ```
 
-- The Jenkins **user id is the full email**, lowercase (stable and collision-free).
+- The Jenkins **user id is the full email**, lowercase, bound at first login to the
+  Google account's stable id (`sub`). A later login with the same email but a different
+  Google account (for example after the address was reassigned) is refused.
 - Authorities are re-resolved at every Google login and last for the session.
-- API-token requests and password logins reuse the authorities recorded at the user's
-  most recent Google login.
+- API-token requests reuse the group authorities recorded at the user's most recent
+  Google login for `groupAuthorityMaxAgeDays` days; after that they carry only
+  `authenticated` until the user signs in with Google again.
 
 ## Requirements
 
@@ -96,7 +105,7 @@ sequenceDiagram
 | Java | 17+ (Jenkins controller) |
 | Google Workspace / Cloud Identity | any edition (premium **not** required) |
 | GCP project | with the **Cloud Identity API** enabled |
-| Jenkins root URL | must be configured (used to build the OAuth redirect URI) |
+| Jenkins URL | must be configured in *Manage Jenkins → System* (used to build the OAuth redirect URI; Google login is refused without it) |
 
 ## Installation
 
@@ -184,6 +193,7 @@ jenkins:
       hostedDomain: "your-domain.com"                          # required; hd claim check
       groupIncludePattern: "^jenkins-.*@your-domain\\.com$"    # optional authority filter
       onGroupLookupFailure: "DEGRADE"                          # DEGRADE | FAIL
+      groupAuthorityMaxAgeDays: 7                              # API-token group expiry; 0 = never
 ```
 
 Every field supports JCasC interpolation, from environment variables or any other
@@ -230,7 +240,8 @@ jenkins:
               - user: "qaautomation"             # API-token automation user, keep it
 ```
 
-That's it. Membership changes in Google Groups apply at each user's next login.
+That's it. Membership changes in Google Groups apply at each user's next login, and
+to their API tokens within `groupAuthorityMaxAgeDays` (see [Offboarding](#offboarding)).
 
 ## Configuration reference
 
@@ -240,6 +251,7 @@ That's it. Membership changes in Google Groups apply at each user's next login.
 | `clientSecret` | Yes | *(none)* | OAuth client secret (stored encrypted as `hudson.util.Secret`) |
 | `hostedDomain` | Yes | *(none)* | Workspace domain, e.g. `your-domain.com`. Logins are **rejected** unless the verified ID token's `hd` claim equals this (defense in depth on top of the Internal consent screen) |
 | `groupIncludePattern` | No | *(all groups)* | Java regex; only matching group emails become authorities. Keeps authority lists small, e.g. `^jenkins-.*@your-domain\.com$` |
+| `groupAuthorityMaxAgeDays` | No | `7` | Days that the group authorities recorded at a user's last Google login stay valid for **API-token** requests. Jenkins never re-checks Google between logins, so this bounds how long a removed member keeps group permissions through their tokens. After expiry, token requests carry only `authenticated` until the user signs in with Google again. `0` = never expire (not recommended). Local users are not affected |
 | `onGroupLookupFailure` | No | `DEGRADE` | What to do when the group lookup fails at login: `DEGRADE` = log in with only the `authenticated` authority and log a loud WARNING; `FAIL` = refuse the login. Failures are never cached as "no groups" |
 
 Behavior notes:
@@ -248,7 +260,32 @@ Behavior notes:
 - **Group cache:** successful lookups are cached for 60 seconds per user to absorb
   login storms; failures are never cached.
 - **Authorities refresh at login**, not in the background: a removed group membership
-  persists until that user's session ends and they log in again.
+  persists until that user's session ends and they log in again, and in their API
+  tokens for up to `groupAuthorityMaxAgeDays`.
+
+### Offboarding
+
+Removing someone from a Google Group (or from the Workspace) does not reach Jenkins
+immediately, because Jenkins only talks to Google when that person signs in:
+
+| Access path | When the removal takes effect |
+|---|---|
+| New Google login | Immediately (the group is gone, or the login fails) |
+| Existing browser session | When the session ends (Jenkins session timeout) |
+| API tokens | After `groupAuthorityMaxAgeDays` without a Google login (default 7 days) |
+
+For immediate removal (for example, a departing administrator), also **delete the
+person's Jenkins user** (*Manage Jenkins → Users*). That revokes their API tokens and
+ends their access at once.
+
+### Email address reuse
+
+Each Jenkins user record is bound to the Google account (`sub` claim) that first signed
+in with its email. If the address is later given to a different Google account, that
+account's login is **refused** with a log message naming both account ids, rather than
+inheriting the old record's API tokens, user-scoped credentials and `user:` grants. To
+let the new owner in, delete the old Jenkins user record first. Records created before
+this binding existed are bound at their next Google login.
 
 ## The login page
 
@@ -292,7 +329,8 @@ Google login: alice@your-domain.com authorities=[authenticated, jenkins-qa@your-
 
 | Symptom | Cause / fix |
 |---|---|
-| `Jenkins root URL is not configured` | Set it in *Manage Jenkins → System → Jenkins URL* (needed for the redirect URI) |
+| `Google login is not configured correctly: ...` (HTTP 500) | The message names what is missing: Client ID, hosted domain, or the Jenkins URL (*Manage Jenkins → System → Jenkins URL*). Password login keeps working meanwhile |
+| `this email address belongs to a different Google account` | The email was reassigned to a new Google account; see [Email address reuse](#email-address-reuse) |
 | `redirect_uri_mismatch` from Google | The authorized redirect URI in GCP must be exactly `https://<jenkins-url>/securityRealm/finishLogin` |
 | `hd claim ... does not match` in logs | User signed in with an account outside `hostedDomain`; rejection is expected |
 | `State did not match or login session expired` | Stale/expired login attempt (or cookies blocked); just retry |
@@ -305,7 +343,8 @@ Google login: alice@your-domain.com authorities=[authenticated, jenkins-qa@your-
   licensing (`searchTransitiveGroups`).
 - **Silent group filtering** by Google (visibility settings) cannot be detected
   server-side in user-token mode; mitigated by login logging and `whoami`.
-- **No background authority refresh:** changes apply at next login.
+- **No background authority refresh:** changes apply at next login (and to API tokens
+  within `groupAuthorityMaxAgeDays`); see [Offboarding](#offboarding).
 - The realm is intentionally designed so a **service-account resolver mode** (Cloud
   Identity Groups Reader or Admin SDK with domain-wide delegation) can be added later
   without redesigning; not implemented in v1.

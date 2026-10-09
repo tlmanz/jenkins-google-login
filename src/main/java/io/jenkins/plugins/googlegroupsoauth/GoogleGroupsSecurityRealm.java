@@ -30,12 +30,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 import jenkins.model.Jenkins;
+import jenkins.model.JenkinsLocationConfiguration;
 import jenkins.security.LastGrantedAuthoritiesProperty;
 import jenkins.security.SecurityListener;
 import jenkins.security.stapler.StaplerDispatchable;
@@ -56,6 +58,7 @@ import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.crypto.password.PasswordEncoder;
 
 /**
  * Hybrid security realm: sign in with Google OAuth (with the user's direct Google Group
@@ -69,9 +72,12 @@ import org.springframework.security.core.userdetails.UsernameNotFoundException;
  * OAuth is down or misconfigured. {@link GoogleFederatedLoginService} adds the
  * "Sign in with Google" button underneath that form.
  *
- * <p>Google user id = full email (lowercase). Authorities are re-resolved at each Google
- * login and live for the session; API-token requests and password logins get the authorities
- * recorded at the user's last Google login via {@link LastGrantedAuthoritiesProperty}.
+ * <p>Google user id = full email (lowercase), bound to the Google account's stable {@code sub}
+ * on first login ({@link GoogleAccountProperty}). Authorities are re-resolved at each Google
+ * login and live for the session; API-token requests get the authorities recorded at the
+ * user's last Google login via {@link LastGrantedAuthoritiesProperty}, but only for
+ * {@link #getGroupAuthorityMaxAgeDays()} days, because Jenkins cannot see later removals from
+ * Google Groups or from the Workspace.
  * Pre-existing local users' API tokens keep working because token authentication checks
  * stored user records independent of this realm.
  */
@@ -92,7 +98,21 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
     /** Expired entries are purged once this many distinct users are cached, bounding memory. */
     private static final int GROUP_CACHE_MAX_SIZE = 1000;
 
+    /** Default for {@link #getGroupAuthorityMaxAgeDays()}. */
+    static final int DEFAULT_GROUP_AUTHORITY_MAX_AGE_DAYS = 7;
+
+    /** OAuth 2.0 error codes are short ASCII tokens (RFC 6749 section 4.1.2.1); anything else is not echoed. */
+    private static final Pattern OAUTH_ERROR_CODE = Pattern.compile("^[a-z_]{1,64}$");
+
     private static final SecureRandom RANDOM = new SecureRandom();
+
+    /**
+     * Core's password encoder and a hash nobody knows the password for: checking against it when
+     * the user has no stored password keeps the response time the same as for a wrong password,
+     * so login timing does not reveal which usernames exist (as core's own local realm does).
+     */
+    private static final PasswordEncoder PASSWORD_ENCODER = HudsonPrivateSecurityRealm.PASSWORD_ENCODER;
+    private static final String DUMMY_PASSWORD_HASH = PASSWORD_ENCODER.encode(randomUrlSafeToken());
 
     private final String clientId;
     private final Secret clientSecret;
@@ -101,6 +121,9 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
     private String groupIncludePattern;
     @NonNull
     private GroupLookupFailurePolicy onGroupLookupFailure = GroupLookupFailurePolicy.DEGRADE;
+    /** Null means the default, including for configurations saved before this setting existed. */
+    @CheckForNull
+    private Integer groupAuthorityMaxAgeDays;
 
     private transient volatile GroupResolver groupResolver;
     private transient volatile Map<String, CachedGroups> groupCache;
@@ -145,6 +168,23 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
         this.onGroupLookupFailure = onGroupLookupFailure;
     }
 
+    /**
+     * How many days the group authorities recorded at a user's last Google login stay valid for
+     * API-token requests. Jenkins never re-checks Google between logins, so without a limit
+     * someone removed from a group (or from the Workspace) keeps that group's permissions
+     * through their API tokens indefinitely. After expiry, token requests carry only
+     * {@code authenticated} until the user signs in with Google again. {@code 0} disables
+     * expiry. Sessions are not affected; they end with the normal session timeout.
+     */
+    public int getGroupAuthorityMaxAgeDays() {
+        return groupAuthorityMaxAgeDays != null ? groupAuthorityMaxAgeDays : DEFAULT_GROUP_AUTHORITY_MAX_AGE_DAYS;
+    }
+
+    @DataBoundSetter
+    public void setGroupAuthorityMaxAgeDays(int groupAuthorityMaxAgeDays) {
+        this.groupAuthorityMaxAgeDays = Math.max(0, groupAuthorityMaxAgeDays);
+    }
+
     @Override
     public boolean allowsSignup() {
         return false;
@@ -162,11 +202,18 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
         User user = User.getById(username, false);
         HudsonPrivateSecurityRealm.Details details =
                 user != null ? user.getProperty(HudsonPrivateSecurityRealm.Details.class) : null;
-        if (details == null || !details.isPasswordCorrect(password)) {
-            LOGGER.warning(() -> "Failed local password login attempt for: " + username);
+        boolean correct;
+        if (details != null) {
+            correct = details.isPasswordCorrect(password);
+        } else {
+            PASSWORD_ENCODER.matches(password, DUMMY_PASSWORD_HASH);
+            correct = false;
+        }
+        if (!correct) {
+            LOGGER.warning(() -> "Failed local password login attempt for: " + sanitizeForLog(username));
             throw new BadCredentialsException("Invalid username or password");
         }
-        LOGGER.info(() -> "Local password login: " + username);
+        LOGGER.info(() -> "Local password login: " + sanitizeForLog(username));
         return loadUserByUsername2(username);
     }
 
@@ -174,13 +221,22 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
      * Returns the user if a Jenkins user record exists — this keeps API-token users resolvable
      * and lets authorization strategies validate names. Authorities come from the last
      * interactive login ({@link LastGrantedAuthoritiesProperty}), so API-token requests carry
-     * the user's group authorities too.
+     * the user's group authorities too, until {@link #getGroupAuthorityMaxAgeDays()} days after
+     * their last Google login. Local users (no {@link GoogleAccountProperty}) never expire:
+     * their access comes from {@code user:} grants, not Google Groups.
      */
     @Override
     public UserDetails loadUserByUsername2(String username) throws UsernameNotFoundException {
         User user = User.getById(username, false);
         if (user == null) {
             throw new UsernameNotFoundException("No Jenkins user record for: " + username);
+        }
+        GoogleAccountProperty google = user.getProperty(GoogleAccountProperty.class);
+        if (google != null && groupAuthoritiesExpired(google)) {
+            LOGGER.fine(() -> "Group authorities of " + username + " expired (no Google login for more than "
+                    + getGroupAuthorityMaxAgeDays() + " days); granting 'authenticated' only");
+            return new org.springframework.security.core.userdetails.User(
+                    username, "", List.of(AUTHENTICATED_AUTHORITY2));
         }
         LastGrantedAuthoritiesProperty property = user.getProperty(LastGrantedAuthoritiesProperty.class);
         List<GrantedAuthority> authorities = property != null
@@ -222,6 +278,10 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
     public HttpResponse doCommenceLogin(
             StaplerRequest2 request, @QueryParameter String from, @Header("Referer") String referer)
             throws IOException {
+        HttpResponse misconfigured = misconfigured();
+        if (misconfigured != null) {
+            return misconfigured;
+        }
         String redirectOnFinish = calculateSafeRedirect(from, referer);
         String state = randomUrlSafeToken();
         String pkceVerifier = randomUrlSafeToken();
@@ -252,9 +312,15 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
             session.removeAttribute(SESSION_FROM);
         }
 
+        HttpResponse misconfigured = misconfigured();
+        if (misconfigured != null) {
+            return misconfigured;
+        }
+
         if (error != null) {
-            LOGGER.warning(() -> "Google login refused by authorization server: " + error);
-            return HttpResponses.errorWithoutStack(401, "Google login failed: " + error);
+            LOGGER.warning(() -> "Google login refused by authorization server: " + sanitizeForLog(error));
+            String shown = OAUTH_ERROR_CODE.matcher(error).matches() ? error : "unrecognized error";
+            return HttpResponses.errorWithoutStack(401, "Google login failed: " + shown);
         }
         if (code == null || state == null || expectedState == null || pkceVerifier == null
                 || !MessageDigest.isEqual(
@@ -277,6 +343,19 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
         GoogleUserInfo userInfo = new GoogleUserInfo(payload);
         String userId = userInfo.getEmail();
 
+        // The email may have been reassigned to a different Google account since this user
+        // record was bound; never let the new account inherit the old one's tokens and grants.
+        User existing = User.getById(userId, false);
+        GoogleAccountProperty bound = existing != null ? existing.getProperty(GoogleAccountProperty.class) : null;
+        if (bound != null && !bound.getSubject().equals(userInfo.getSubject())) {
+            LOGGER.severe(() -> "Refusing Google login for " + userId + ": the Jenkins user record belongs to"
+                    + " Google account " + bound.getSubject() + " but this login is account "
+                    + userInfo.getSubject() + " (email reassigned?). Delete the Jenkins user to allow it.");
+            return HttpResponses.errorWithoutStack(401,
+                    "Login refused: this email address belongs to a different Google account than the one"
+                            + " previously used in Jenkins. Contact an administrator.");
+        }
+
         List<GrantedAuthority> authorities;
         try {
             authorities = authoritiesForLogin(userId, tokenResponse.getAccessToken());
@@ -297,6 +376,7 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
         SecurityContextHolder.getContext().setAuthentication(token);
 
         User user = User.getById(userId, true);
+        user.addProperty(new GoogleAccountProperty(userInfo.getSubject(), clock().getAsLong()));
         userInfo.updateProfile(user);
 
         SecurityListener.fireAuthenticated2(
@@ -357,14 +437,61 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
 
     // ---------------------------------------------------------------- helpers
 
+    private boolean groupAuthoritiesExpired(@NonNull GoogleAccountProperty google) {
+        int maxAgeDays = getGroupAuthorityMaxAgeDays();
+        return maxAgeDays > 0
+                && clock().getAsLong() - google.getLastLoginMillis() > TimeUnit.DAYS.toMillis(maxAgeDays);
+    }
+
+    /** Replaces control characters so request-supplied values cannot forge extra log lines. */
+    @NonNull
+    static String sanitizeForLog(@CheckForNull String value) {
+        return value == null ? "null" : value.replaceAll("\\p{Cntrl}", "_");
+    }
+
+    /**
+     * @return why Google login cannot work with the current configuration, or null if it can.
+     *     Checked at login rather than rejected at configuration time: failing the configuration
+     *     (e.g. a JCasC reload) would also take down the break-glass password login.
+     */
+    @CheckForNull
+    String configurationProblem() {
+        if (clientId == null) {
+            return "the Client ID is not configured";
+        }
+        if (hostedDomain == null) {
+            return "the hosted domain is not configured";
+        }
+        if (JenkinsLocationConfiguration.get().getUrl() == null) {
+            return "the Jenkins URL is not configured (Manage Jenkins > System > Jenkins URL);"
+                    + " it is required to build the OAuth redirect URI";
+        }
+        return null;
+    }
+
+    @CheckForNull
+    private HttpResponse misconfigured() {
+        String problem = configurationProblem();
+        if (problem == null) {
+            return null;
+        }
+        LOGGER.severe(() -> "Google login is unavailable: " + problem);
+        return HttpResponses.errorWithoutStack(500,
+                "Google login is not configured correctly: " + problem + ". Contact an administrator.");
+    }
+
+    /**
+     * Uses only the configured Jenkins URL. {@link Jenkins#getRootUrl()} would fall back to the
+     * request's Host header when none is configured, letting a request choose the redirect URI.
+     */
     @NonNull
     String buildRedirectUri() {
-        String rootUrl = Jenkins.get().getRootUrl();
-        if (rootUrl == null) {
+        String url = JenkinsLocationConfiguration.get().getUrl();
+        if (url == null) {
             throw new IllegalStateException(
-                    "Jenkins root URL is not configured; it is required to build the OAuth redirect URI");
+                    "Jenkins URL is not configured; it is required to build the OAuth redirect URI");
         }
-        return rootUrl + "securityRealm/finishLogin";
+        return Util.ensureEndsWith(url, "/") + "securityRealm/finishLogin";
     }
 
     @NonNull
@@ -511,6 +638,24 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
             } catch (PatternSyntaxException e) {
                 return FormValidation.error(e, Messages.GoogleGroupsSecurityRealm_GroupIncludePatternInvalid());
             }
+        }
+
+        @RequirePOST
+        public FormValidation doCheckGroupAuthorityMaxAgeDays(@QueryParameter String value) {
+            Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+            int days;
+            try {
+                days = Integer.parseInt(Util.fixEmptyAndTrim(value) == null ? "" : value.trim());
+            } catch (NumberFormatException e) {
+                return FormValidation.error(Messages.GoogleGroupsSecurityRealm_GroupAuthorityMaxAgeDaysInvalid());
+            }
+            if (days < 0) {
+                return FormValidation.error(Messages.GoogleGroupsSecurityRealm_GroupAuthorityMaxAgeDaysInvalid());
+            }
+            if (days == 0) {
+                return FormValidation.warning(Messages.GoogleGroupsSecurityRealm_GroupAuthorityMaxAgeDaysDisabled());
+            }
+            return FormValidation.ok();
         }
 
         public ListBoxModel doFillOnGroupLookupFailureItems() {

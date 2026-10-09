@@ -6,3 +6,4 @@ jenkins:
       hostedDomain: "example.com"
       groupIncludePattern: "^jenkins-.*@example\\.com$"
       onGroupLookupFailure: "FAIL"
+      groupAuthorityMaxAgeDays: 3

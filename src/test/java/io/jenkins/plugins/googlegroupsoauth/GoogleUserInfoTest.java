@@ -10,6 +10,7 @@ public class GoogleUserInfoTest {
 
     private static GoogleIdToken.Payload payload(String email, Object name) {
         GoogleIdToken.Payload payload = new GoogleIdToken.Payload();
+        payload.setSubject("1234567890");
         payload.setEmail(email);
         if (name != null) {
             payload.set("name", name);
@@ -20,6 +21,11 @@ public class GoogleUserInfoTest {
     @Test
     public void emailIsLowercased() {
         assertEquals("alice@example.com", new GoogleUserInfo(payload("Alice@Example.COM", "Alice")).getEmail());
+    }
+
+    @Test
+    public void subjectIsExposed() {
+        assertEquals("1234567890", new GoogleUserInfo(payload("a@example.com", null)).getSubject());
     }
 
     @Test

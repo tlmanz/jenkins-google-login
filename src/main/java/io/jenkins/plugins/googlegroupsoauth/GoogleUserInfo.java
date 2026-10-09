@@ -14,14 +14,22 @@ import java.util.Locale;
  */
 public class GoogleUserInfo {
 
+    private final String subject;
     private final String email;
     @CheckForNull
     private final String name;
 
     public GoogleUserInfo(@NonNull GoogleIdToken.Payload payload) {
+        this.subject = payload.getSubject();
         this.email = payload.getEmail().toLowerCase(Locale.ROOT);
         Object nameClaim = payload.get("name");
         this.name = nameClaim instanceof String s && !s.isBlank() ? s : null;
+    }
+
+    /** Google's stable account id (the {@code sub} claim); unlike the email it is never reassigned. */
+    @NonNull
+    public String getSubject() {
+        return subject;
     }
 
     @NonNull

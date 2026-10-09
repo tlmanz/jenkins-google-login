@@ -27,6 +27,7 @@ public class JCasCTest {
         assertEquals("example.com", realm.getHostedDomain());
         assertEquals("^jenkins-.*@example\\.com$", realm.getGroupIncludePattern());
         assertEquals(GroupLookupFailurePolicy.FAIL, realm.getOnGroupLookupFailure());
+        assertEquals(3, realm.getGroupAuthorityMaxAgeDays());
         assertFalse(realm.allowsSignup());
     }
 
@@ -38,6 +39,7 @@ public class JCasCTest {
         String exported = out.toString(StandardCharsets.UTF_8);
         assertTrue("export should contain the realm symbol", exported.contains("googleGroupsOAuth"));
         assertTrue(exported.contains("hostedDomain: \"example.com\""));
+        assertTrue(exported.contains("groupAuthorityMaxAgeDays: 3"));
         assertFalse("client secret must not be exported in plaintext", exported.contains("s3cret-value"));
     }
 }

@@ -1,6 +1,7 @@
 package io.jenkins.plugins.googlegroupsoauth;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -18,6 +19,9 @@ import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import jenkins.model.JenkinsLocationConfiguration;
 import org.htmlunit.Page;
 import org.htmlunit.WebRequest;
 import org.junit.Rule;
@@ -43,6 +47,7 @@ public class GoogleLoginFlowTest {
     /** Realm whose OAuth service never touches the network and yields a fixed identity. */
     private static class TestRealm extends GoogleGroupsSecurityRealm {
         transient IOException nextExchangeFailure;
+        transient String subject = "sub-alice";
 
         TestRealm() {
             super("client-id", null, "example.com");
@@ -68,6 +73,7 @@ public class GoogleLoginFlowTest {
                 @Override
                 GoogleIdToken.Payload verifyAndGetPayload(GoogleTokenResponse tokenResponse) {
                     GoogleIdToken.Payload payload = new GoogleIdToken.Payload();
+                    payload.setSubject(subject);
                     payload.setEmail("Alice@Example.com");
                     payload.setEmailVerified(true);
                     payload.setHostedDomain("example.com");
@@ -163,9 +169,16 @@ public class GoogleLoginFlowTest {
     public void invalidCallbacksAreRejected() throws Exception {
         j.jenkins.setSecurityRealm(new TestRealm());
 
-        // provider-reported error
-        assertEquals(401, get(rawClient(), "securityRealm/finishLogin?error=access_denied")
-                .getWebResponse().getStatusCode());
+        // provider-reported error: a well-formed OAuth error code is shown...
+        Page denied = get(rawClient(), "securityRealm/finishLogin?error=access_denied");
+        assertEquals(401, denied.getWebResponse().getStatusCode());
+        assertTrue(denied.getWebResponse().getContentAsString().contains("access_denied"));
+
+        // ...but arbitrary attacker-chosen text is not echoed into the page
+        Page spoofed = get(rawClient(), "securityRealm/finishLogin?error="
+                + URLEncoder.encode("Call 555-0100 to restore access", StandardCharsets.UTF_8));
+        assertEquals(401, spoofed.getWebResponse().getStatusCode());
+        assertFalse(spoofed.getWebResponse().getContentAsString().contains("555-0100"));
 
         // no login session at all
         assertEquals(401, get(rawClient(), "securityRealm/finishLogin?code=x&state=y")
@@ -248,6 +261,86 @@ public class GoogleLoginFlowTest {
     }
 
     @Test
+    public void emailReassignedToAnotherGoogleAccountIsRefused() throws Exception {
+        TestRealm realm = new TestRealm();
+        j.jenkins.setSecurityRealm(realm);
+
+        JenkinsRule.WebClient wc = rawClient();
+        assertEquals(302, finishLogin(wc, commenceAndGetState(wc, "")).getWebResponse().getStatusCode());
+        assertEquals("sub-alice", User.getById(EMAIL, false).getProperty(GoogleAccountProperty.class).getSubject());
+
+        // Same email, different Google account: refused, binding unchanged, no session.
+        realm.subject = "sub-someone-else";
+        JenkinsRule.WebClient wc2 = rawClient();
+        assertEquals(401, finishLogin(wc2, commenceAndGetState(wc2, "")).getWebResponse().getStatusCode());
+        assertTrue(get(wc2, "securityRealm/whoami/").getWebResponse().getContentAsString().contains("not logged in"));
+        assertEquals("sub-alice", User.getById(EMAIL, false).getProperty(GoogleAccountProperty.class).getSubject());
+
+        // The original account still gets in.
+        realm.subject = "sub-alice";
+        JenkinsRule.WebClient wc3 = rawClient();
+        assertEquals(302, finishLogin(wc3, commenceAndGetState(wc3, "")).getWebResponse().getStatusCode());
+    }
+
+    @Test
+    public void groupAuthoritiesForApiTokensExpireAfterMaxAge() throws Exception {
+        TestRealm realm = new TestRealm();
+        AtomicLong now = new AtomicLong(TimeUnit.DAYS.toMillis(1000));
+        realm.setClock(now::get);
+        j.jenkins.setSecurityRealm(realm);
+        assertEquals(7, realm.getGroupAuthorityMaxAgeDays());
+
+        JenkinsRule.WebClient wc = rawClient();
+        finishLogin(wc, commenceAndGetState(wc, ""));
+        User.getById("local-bot", true); // a non-Google user record, e.g. from the local-database era
+
+        now.addAndGet(TimeUnit.DAYS.toMillis(7));
+        assertTrue("still within max age", hasAuthority(realm.loadUserByUsername2(EMAIL), GROUP));
+
+        now.addAndGet(1);
+        UserDetails expired = realm.loadUserByUsername2(EMAIL);
+        assertFalse("group authority must expire", hasAuthority(expired, GROUP));
+        assertTrue(hasAuthority(expired, "authenticated"));
+        assertTrue("non-Google users never expire",
+                hasAuthority(realm.loadUserByUsername2("local-bot"), "authenticated"));
+
+        realm.setGroupAuthorityMaxAgeDays(0);
+        assertTrue("0 disables expiry", hasAuthority(realm.loadUserByUsername2(EMAIL), GROUP));
+
+        // A fresh Google login renews the authorities.
+        realm.setGroupAuthorityMaxAgeDays(7);
+        JenkinsRule.WebClient wc2 = rawClient();
+        finishLogin(wc2, commenceAndGetState(wc2, ""));
+        assertTrue(hasAuthority(realm.loadUserByUsername2(EMAIL), GROUP));
+    }
+
+    @Test
+    public void incompleteConfigurationFailsLoginClearly() throws Exception {
+        j.jenkins.setSecurityRealm(new GoogleGroupsSecurityRealm("", null, "example.com"));
+        assertMisconfigured("Client ID");
+
+        j.jenkins.setSecurityRealm(new GoogleGroupsSecurityRealm("client-id", null, " "));
+        assertMisconfigured("hosted domain");
+
+        // No configured Jenkins URL: the Host header must not be used to build the redirect URI.
+        j.jenkins.setSecurityRealm(new TestRealm());
+        JenkinsLocationConfiguration.get().setUrl(null);
+        assertMisconfigured("Jenkins URL");
+        assertEquals(500, get(rawClient(), "securityRealm/finishLogin?code=x&state=y")
+                .getWebResponse().getStatusCode());
+    }
+
+    private void assertMisconfigured(String expected) throws IOException {
+        Page page = get(rawClient(), "securityRealm/commenceLogin");
+        assertEquals(500, page.getWebResponse().getStatusCode());
+        assertTrue(page.getWebResponse().getContentAsString().contains(expected));
+    }
+
+    private static boolean hasAuthority(UserDetails details, String authority) {
+        return details.getAuthorities().stream().map(GrantedAuthority::getAuthority).anyMatch(authority::equals);
+    }
+
+    @Test
     public void descriptorValidationAndUnknownUserLookup() {
         GoogleGroupsSecurityRealm realm = new GoogleGroupsSecurityRealm("client-id", null, "example.com");
         j.jenkins.setSecurityRealm(realm);
@@ -269,6 +362,12 @@ public class GoogleLoginFlowTest {
         assertEquals(FormValidation.Kind.OK, d.doCheckGroupIncludePattern("").kind);
         assertEquals(FormValidation.Kind.OK, d.doCheckGroupIncludePattern("^jenkins-.*$").kind);
         assertEquals(FormValidation.Kind.ERROR, d.doCheckGroupIncludePattern("[unclosed").kind);
+
+        assertEquals(FormValidation.Kind.OK, d.doCheckGroupAuthorityMaxAgeDays("7").kind);
+        assertEquals(FormValidation.Kind.WARNING, d.doCheckGroupAuthorityMaxAgeDays("0").kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckGroupAuthorityMaxAgeDays("-1").kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckGroupAuthorityMaxAgeDays("seven").kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckGroupAuthorityMaxAgeDays("").kind);
 
         ListBoxModel model = d.doFillOnGroupLookupFailureItems();
         assertEquals(2, model.size());

@@ -32,6 +32,21 @@ public class GoogleGroupsSecurityRealmTest {
     }
 
     @Test
+    public void logValuesCannotInjectLines() {
+        assertEquals("alice_[INFO] forged", GoogleGroupsSecurityRealm.sanitizeForLog("alice\n[INFO] forged"));
+        assertEquals("a_b_c", GoogleGroupsSecurityRealm.sanitizeForLog("a\rb\u0000c"));
+        assertEquals("null", GoogleGroupsSecurityRealm.sanitizeForLog(null));
+    }
+
+    @Test
+    public void groupAuthorityMaxAgeDefaultsAndClampsNegative() {
+        GoogleGroupsSecurityRealm realm = realm();
+        assertEquals(GoogleGroupsSecurityRealm.DEFAULT_GROUP_AUTHORITY_MAX_AGE_DAYS, realm.getGroupAuthorityMaxAgeDays());
+        realm.setGroupAuthorityMaxAgeDays(-5);
+        assertEquals(0, realm.getGroupAuthorityMaxAgeDays());
+    }
+
+    @Test
     public void federatedLoginServiceExposesUrlNameAndNoUserProperty() {
         GoogleFederatedLoginService service = new GoogleFederatedLoginService();
         assertEquals("googleGroupsOAuth", service.getUrlName());

@@ -109,6 +109,9 @@ class GoogleOAuthService {
                     "ID token failed verification (signature/issuer/audience/expiry)");
         }
         GoogleIdToken.Payload payload = idToken.getPayload();
+        if (payload.getSubject() == null || payload.getSubject().isEmpty()) {
+            throw new GeneralSecurityException("ID token contains no sub claim");
+        }
         if (payload.getEmail() == null) {
             throw new GeneralSecurityException("ID token contains no email claim");
         }
