@@ -1,6 +1,6 @@
 # Google Groups OAuth Security Realm
 
-![Jenkins](https://img.shields.io/badge/Jenkins-2.479.3%2B-blue?logo=jenkins&logoColor=white)
+![Jenkins](https://img.shields.io/badge/Jenkins-2.541.1%2B-blue?logo=jenkins&logoColor=white)
 ![Java](https://img.shields.io/badge/Java-17%2B-orange?logo=openjdk&logoColor=white)
 ![License](https://img.shields.io/badge/License-Apache--2.0-green)
 
@@ -101,7 +101,7 @@ sequenceDiagram
 
 | Requirement | Version / notes |
 |---|---|
-| Jenkins | 2.479.3 or newer (plugin baseline) |
+| Jenkins | 2.541.1 or newer (plugin baseline) |
 | Java | 17+ (Jenkins controller) |
 | Google Workspace / Cloud Identity | any edition (premium **not** required) |
 | GCP project | with the **Cloud Identity API** enabled |
