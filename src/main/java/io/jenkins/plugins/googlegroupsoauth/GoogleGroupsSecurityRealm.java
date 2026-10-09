@@ -275,6 +275,12 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
 
     // ---------------------------------------------------------------- login flow
 
+    /**
+     * Starts the OAuth code flow. Reached by the "Sign in with Google" link, so it must accept
+     * GET and anonymous callers. Its only effect is storing a fresh {@code state} and PKCE
+     * verifier in the caller's own session; forcing a victim here merely restarts their login.
+     */
+    @SuppressWarnings({"lgtm[jenkins/csrf]", "lgtm[jenkins/no-permission-check]"})
     public HttpResponse doCommenceLogin(
             StaplerRequest2 request, @QueryParameter String from, @Header("Referer") String referer)
             throws IOException {
@@ -293,6 +299,14 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
         return HttpResponses.redirectTo(url);
     }
 
+    /**
+     * OAuth redirect URI. Google redirects the browser here with a GET request (RFC 6749
+     * section 4.1.2) before the user is logged in, so neither POST nor a permission check is
+     * possible. CSRF protection is the OAuth {@code state} parameter, which must match the
+     * single-use value stored in the caller's session, plus PKCE; the token request to Google's
+     * fixed endpoint only happens after that check.
+     */
+    @SuppressWarnings({"lgtm[jenkins/csrf]", "lgtm[jenkins/no-permission-check]"})
     public HttpResponse doFinishLogin(
             StaplerRequest2 request,
             @QueryParameter String code,
@@ -658,6 +672,8 @@ public class GoogleGroupsSecurityRealm extends AbstractPasswordBasedSecurityReal
             return FormValidation.ok();
         }
 
+        /** Fixed list of enum constants: no side effects and nothing that is not in the source code. */
+        @SuppressWarnings({"lgtm[jenkins/csrf]", "lgtm[jenkins/no-permission-check]"})
         public ListBoxModel doFillOnGroupLookupFailureItems() {
             ListBoxModel model = new ListBoxModel();
             for (GroupLookupFailurePolicy policy : GroupLookupFailurePolicy.values()) {
