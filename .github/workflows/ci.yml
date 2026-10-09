@@ -21,7 +21,7 @@ jobs:
       - name: Build and test (with coverage gate)
         run: ./mvnw -B -ntp -Penable-jacoco verify
       - name: Archive plugin
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: google-groups-oauth.hpi
           path: target/*.hpi
