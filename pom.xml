@@ -28,13 +28,6 @@
     </license>
   </licenses>
 
-  <developers>
-    <developer>
-      <id>tlmanz</id>
-      <name>Tharuka Mannapperuma</name>
-    </developer>
-  </developers>
-
   <scm child.scm.connection.inherit.append.path="false" child.scm.developerConnection.inherit.append.path="false" child.scm.url.inherit.append.path="false">
     <connection>scm:git:https://github.com/${gitHubRepo}</connection>
     <developerConnection>scm:git:https://github.com/${gitHubRepo}</developerConnection>
@@ -48,10 +41,14 @@
     <!-- Repository after hosting in the jenkinsci GitHub organization -->
     <gitHubRepo>jenkinsci/${project.artifactId}-plugin</gitHubRepo>
     <!-- https://www.jenkins.io/doc/developer/plugin-development/choosing-jenkins-baseline/ -->
-    <jenkins.baseline>2.541</jenkins.baseline>
-    <jenkins.version>${jenkins.baseline}.1</jenkins.version>
+    <jenkins.baseline>2.555</jenkins.baseline>
+    <jenkins.version>${jenkins.baseline}.3</jenkins.version>
     <hpi.bundledArtifacts>commons-codec,error_prone_annotations,google-api-client,google-http-client,google-http-client-gson,google-oauth-client,grpc-api,grpc-context,opencensus-api,opencensus-contrib-http-util</hpi.bundledArtifacts>
     <hpi.strictBundledArtifacts>true</hpi.strictBundledArtifacts>
+    <banObsoleteDependencyOverrides.skip>false</banObsoleteDependencyOverrides.skip>
+    <ban-junit4-imports.skip>false</ban-junit4-imports.skip>
+    <ban-deprecated-stapler.skip>false</ban-deprecated-stapler.skip>
+    <ban-commons-lang-2.skip>false</ban-commons-lang-2.skip>
   </properties>
 
   <dependencyManagement>
@@ -65,7 +62,7 @@
       <dependency>
         <groupId>io.jenkins.tools.bom</groupId>
         <artifactId>bom-${jenkins.baseline}.x</artifactId>
-        <version>7002.v028a_3607ddc8</version>
+        <version>7134.vc450c4b_83de0</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>

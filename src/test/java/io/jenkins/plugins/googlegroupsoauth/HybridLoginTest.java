@@ -1,16 +1,16 @@
 package io.jenkins.plugins.googlegroupsoauth;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import hudson.security.HudsonPrivateSecurityRealm;
 import org.htmlunit.FailingHttpStatusCodeException;
 import org.htmlunit.html.HtmlPage;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.jvnet.hudson.test.JenkinsRule;
+import org.jvnet.hudson.test.junit.jupiter.WithJenkins;
 
 /**
  * Break-glass behavior: with the Google realm active, a pre-existing local user (created
@@ -18,13 +18,14 @@ import org.jvnet.hudson.test.JenkinsRule;
  * and password through the standard login form, and the login page carries the
  * "Sign in with Google" button.
  */
+@WithJenkins
 public class HybridLoginTest {
 
-    @Rule
-    public JenkinsRule j = new JenkinsRule();
+    private JenkinsRule j;
 
-    @Before
-    public void setUp() throws Exception {
+    @BeforeEach
+    void setUp(JenkinsRule rule) throws Exception {
+        j = rule;
         // Simulate the migration: users exist from the local-database era...
         HudsonPrivateSecurityRealm localRealm = new HudsonPrivateSecurityRealm(false, false, null);
         j.jenkins.setSecurityRealm(localRealm);
@@ -59,9 +60,9 @@ public class HybridLoginTest {
         JenkinsRule.WebClient wc = j.createWebClient();
         HtmlPage login = wc.goTo("login");
         String content = login.getWebResponse().getContentAsString();
-        assertTrue("username/password form should be present", content.contains("j_username"));
-        assertTrue("Google sign-in button should be present",
-                content.contains("securityRealm/commenceLogin"));
+        assertTrue(content.contains("j_username"), "username/password form should be present");
+        assertTrue(content.contains("securityRealm/commenceLogin"),
+                "Google sign-in button should be present");
     }
 
     @Test

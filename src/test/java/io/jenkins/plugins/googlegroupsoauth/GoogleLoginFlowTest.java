@@ -1,10 +1,10 @@
 package io.jenkins.plugins.googlegroupsoauth;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.api.client.googleapis.auth.oauth2.GoogleIdToken;
 import com.google.api.client.googleapis.auth.oauth2.GoogleTokenResponse;
@@ -24,9 +24,10 @@ import java.util.concurrent.atomic.AtomicLong;
 import jenkins.model.JenkinsLocationConfiguration;
 import org.htmlunit.Page;
 import org.htmlunit.WebRequest;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.jvnet.hudson.test.JenkinsRule;
+import org.jvnet.hudson.test.junit.jupiter.WithJenkins;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
@@ -36,13 +37,18 @@ import org.springframework.security.core.userdetails.UsernameNotFoundException;
  * exchange and ID token verification are stubbed (via the {@code createOAuthService} seam);
  * state/PKCE handling, session fixation, redirects and error paths run for real.
  */
+@WithJenkins
 public class GoogleLoginFlowTest {
 
     private static final String EMAIL = "alice@example.com";
     private static final String GROUP = "jenkins-qa@example.com";
 
-    @Rule
-    public JenkinsRule j = new JenkinsRule();
+    private JenkinsRule j;
+
+    @BeforeEach
+    void setUp(JenkinsRule rule) {
+        j = rule;
+    }
 
     /** Realm whose OAuth service never touches the network and yields a fixed identity. */
     private static class TestRealm extends GoogleGroupsSecurityRealm {
@@ -295,17 +301,17 @@ public class GoogleLoginFlowTest {
         User.getById("local-bot", true); // a non-Google user record, e.g. from the local-database era
 
         now.addAndGet(TimeUnit.DAYS.toMillis(7));
-        assertTrue("still within max age", hasAuthority(realm.loadUserByUsername2(EMAIL), GROUP));
+        assertTrue(hasAuthority(realm.loadUserByUsername2(EMAIL), GROUP), "still within max age");
 
         now.addAndGet(1);
         UserDetails expired = realm.loadUserByUsername2(EMAIL);
-        assertFalse("group authority must expire", hasAuthority(expired, GROUP));
+        assertFalse(hasAuthority(expired, GROUP), "group authority must expire");
         assertTrue(hasAuthority(expired, "authenticated"));
-        assertTrue("non-Google users never expire",
-                hasAuthority(realm.loadUserByUsername2("local-bot"), "authenticated"));
+        assertTrue(hasAuthority(realm.loadUserByUsername2("local-bot"), "authenticated"),
+                "non-Google users never expire");
 
         realm.setGroupAuthorityMaxAgeDays(0);
-        assertTrue("0 disables expiry", hasAuthority(realm.loadUserByUsername2(EMAIL), GROUP));
+        assertTrue(hasAuthority(realm.loadUserByUsername2(EMAIL), GROUP), "0 disables expiry");
 
         // A fresh Google login renews the authorities.
         realm.setGroupAuthorityMaxAgeDays(7);

@@ -1,13 +1,13 @@
 package io.jenkins.plugins.googlegroupsoauth;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
 
 /** Realm behavior that needs no running Jenkins. */
@@ -78,7 +78,7 @@ public class GoogleGroupsSecurityRealmTest {
 
         int before = calls.get();
         realm.authoritiesForLogin("fresh@example.com", "t");
-        assertEquals("fresh entry must survive the purge and still be served from cache",
-                before, calls.get());
+        assertEquals(before, calls.get(),
+                "fresh entry must survive the purge and still be served from cache");
     }
 }

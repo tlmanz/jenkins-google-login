@@ -1,8 +1,8 @@
 package io.jenkins.plugins.googlegroupsoauth;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -18,8 +18,8 @@ import com.google.api.client.testing.http.MockLowLevelHttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.util.Base64;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 public class GoogleOAuthServiceTest {
 
@@ -29,7 +29,7 @@ public class GoogleOAuthServiceTest {
     private GoogleIdTokenVerifier verifier;
     private GoogleOAuthService service;
 
-    @Before
+    @BeforeEach
     public void setUp() {
         verifier = mock(GoogleIdTokenVerifier.class);
         service = new GoogleOAuthService(CLIENT_ID, null, DOMAIN, new MockHttpTransport(), verifier);

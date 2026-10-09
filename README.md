@@ -1,7 +1,7 @@
 # Google Groups OAuth Security Realm
 
-![Jenkins](https://img.shields.io/badge/Jenkins-2.541.1%2B-blue?logo=jenkins&logoColor=white)
-![Java](https://img.shields.io/badge/Java-17%2B-orange?logo=openjdk&logoColor=white)
+![Jenkins](https://img.shields.io/badge/Jenkins-2.555.3%2B-blue?logo=jenkins&logoColor=white)
+![Java](https://img.shields.io/badge/Java-21%2B-orange?logo=openjdk&logoColor=white)
 ![License](https://img.shields.io/badge/License-Apache--2.0-green)
 
 A Jenkins security realm that lets users **sign in with Google** and turns their
@@ -101,8 +101,8 @@ sequenceDiagram
 
 | Requirement | Version / notes |
 |---|---|
-| Jenkins | 2.541.1 or newer (plugin baseline) |
-| Java | 17+ (Jenkins controller) |
+| Jenkins | 2.555.3 or newer (plugin baseline) |
+| Java | 21+ (Jenkins controller) |
 | Google Workspace / Cloud Identity | any edition (premium **not** required) |
 | GCP project | with the **Cloud Identity API** enabled |
 | Jenkins URL | must be configured in *Manage Jenkins → System* (used to build the OAuth redirect URI; Google login is refused without it) |
@@ -119,7 +119,7 @@ sequenceDiagram
 ### Option B: bake into a custom controller image (recommended for Kubernetes)
 
 ```dockerfile
-FROM jenkins/jenkins:2.541.1-jdk21
+FROM jenkins/jenkins:2.555.3-jdk21
 COPY google-groups-oauth.hpi /usr/share/jenkins/ref/plugins/google-groups-oauth.jpi
 ```
 
